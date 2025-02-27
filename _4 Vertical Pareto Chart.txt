@@ -1,0 +1,196 @@
+__4 Vertical Pareto Chart = 
+-- Use this inside of a Table or Matrix visual.
+-- The 'Image size' property of the Table/Matrix should be set to Height = 30 px, Width = 500 px.
+
+----------------------------------------------------------------------------------------
+-------------------- START CONFIG - SAFELY CHANGE STUFF IN THIS AREA -------------------
+----------------------------------------------------------------------------------------
+
+VAR _CellHeight = 30           -- Change this if you adjust the row height in Power BI
+VAR _MarkerY    = _CellHeight / 2  -- Where your circle is drawn in the current row
+
+// Marker size config
+VAR _MarkerSize         = 4    -- Normal marker circle radius
+VAR _CutoffOuterSize    = 8    -- Outer radius for the cutoff marker
+VAR _CutoffInnerSize    = 4    -- Inner white circle radius for the cutoff marker
+
+// Bar rounding config
+VAR _BarY = 6                          -- Y position for the top of the bar
+VAR _BarHeight = _CellHeight * 0.7       -- Height of the bar (70% of cell height)
+VAR _BarRoundness = 3                  -- Radius for rounding the right side corners
+
+// Input field config
+VAR _Actual = [_4 pareto revenue]//[_4 pareto revenue]
+VAR _Target = [_4 cumulative revenue %] * 0.8
+
+// Chart Config
+VAR _BarMax = 500
+VAR _BarMin = 0
+VAR _Scope = ALLSELECTED('_Customer&Others Table'[Customer])  -- Table comprising all values that group the actuals and targets
+
+// Color config
+VAR _BackgroundColor = "#F5F5F500"  -- Light grey
+VAR _BaselineColor   = "grey"    -- Dark grey
+VAR _TargetColor     = "#12239E"       -- Target color (blue in this example)
+VAR _BarFillColor    = [_4 Color]
+VAR _BarBorderColor  = "#605E5C"      -- Border color for the bars
+
+----------------------------------------------------------------------------------------
+----------------------- END CONFIG - BEYOND HERE THERE BE DRAGONS ----------------------
+----------------------------------------------------------------------------------------
+
+/* Axis & Normalization */
+VAR _MaxActualsInScope =
+    CALCULATE(
+        MAXX(_Scope, [_4 pareto revenue]),
+        REMOVEFILTERS('_Customer&Others Table'[Customer])
+    )
+VAR _MaxTargetInScope =
+    CALCULATE(
+        MAXX(_Scope, [_4 cumulative revenue %]),
+        REMOVEFILTERS('_Customer&Others Table'[Customer])
+    ) 
+VAR _AxisMax =
+        MAX(_MaxActualsInScope, _MaxTargetInScope)
+     
+
+VAR _AxisRange        = _BarMax - _BarMin
+VAR _ActualNormalized = DIVIDE(_Actual, _AxisMax) * _AxisRange
+VAR _TargetNormalized = (DIVIDE(_Target, _AxisMax) * _AxisRange) + _BarMin - 1
+
+/* Rank & Virtual Table */
+VAR _CurrentRank = [_4 Rank]
+VAR _CutoffRank  = [_4 Pareto Cutoff Rank]  // The rank at which we hit the 80% Pareto cutoff
+
+VAR _Table =
+    SUMMARIZE(
+        ALLSELECTED('_Customer&Others Table'[Customer]),
+        '_Customer&Others Table'[Customer],
+        "RankValue", [_4 Rank],
+        "TargetVal", [_4 cumulative revenue %] * 0.8
+    )
+
+VAR _PrevTarget =
+    IF(
+        _CurrentRank > 1,
+        MAXX(
+            FILTER(_Table, [RankValue] = _CurrentRank - 1),
+            [TargetVal]
+        )
+    )
+VAR _PrevTargetNormalized =
+    IF(
+        NOT ISBLANK(_PrevTarget),
+        DIVIDE(_PrevTarget, _AxisMax) * _AxisRange + _BarMin - 1
+    )
+
+VAR _NextTarget =
+    MAXX(
+        FILTER(_Table, [RankValue] = _CurrentRank + 1),
+        [TargetVal]
+    )
+VAR _NextTargetNormalized =
+    IF(
+        NOT ISBLANK(_NextTarget),
+        DIVIDE(_NextTarget, _AxisMax) * _AxisRange + _BarMin - 1
+    )
+
+/*
+   Offsets for connecting lines:
+   - The row above's marker is at y=_MarkerY in its own cell.
+     From the perspective of the current cell, that is y = _MarkerY - _CellHeight.
+   - The row below's marker is at y=_MarkerY in its own cell, which is y = _MarkerY + _CellHeight
+     from the perspective of the current cell.
+*/
+VAR _PrevMarkerY = _MarkerY - _CellHeight
+VAR _NextMarkerY = _MarkerY + _CellHeight
+
+/* Polylines */
+VAR _ConnectingLineUp =
+    IF(
+        _CurrentRank > 1 && NOT ISBLANK(_PrevTargetNormalized),
+        "<polyline points='" 
+            & _PrevTargetNormalized & "," & _PrevMarkerY 
+            & " " 
+            & _TargetNormalized & "," & _MarkerY 
+            & "' fill='none' stroke='" & _TargetColor & "' stroke-width='2' />",
+        ""
+    )
+
+VAR _ConnectingLineDown =
+    IF(
+        NOT ISBLANK(_NextTargetNormalized),
+        "<polyline points='" 
+            & _TargetNormalized & "," & _MarkerY 
+            & " " 
+            & _NextTargetNormalized & "," & _NextMarkerY 
+            & "' fill='none' stroke='" & _TargetColor & "' stroke-width='2' />",
+        ""
+    )
+
+/* Build a path for the actual bar with rounded right-side corners only */
+VAR _ActualBarPath =
+    "M " & _BarMin & " " & _BarY & 
+    " L " & (_BarMin + _ActualNormalized - _BarRoundness) & " " & _BarY & 
+    " A " & _BarRoundness & " " & _BarRoundness & " 0 0 1 " & (_BarMin + _ActualNormalized) & " " & (_BarY + _BarRoundness) & 
+    " L " & (_BarMin + _ActualNormalized) & " " & (_BarY + _BarHeight - _BarRoundness) & 
+    " A " & _BarRoundness & " " & _BarRoundness & " 0 0 1 " & (_BarMin + _ActualNormalized - _BarRoundness) & " " & (_BarY + _BarHeight) & 
+    " L " & _BarMin & " " & (_BarY + _BarHeight) & 
+    " Z"
+
+/* Marker drawing: Normal circle vs. Cutoff marker */
+VAR _NormalCircle =
+    "<circle cx='" & _TargetNormalized & "' cy='" & _MarkerY & "' r='" & _MarkerSize & "' fill='" & _TargetColor & "'/>"
+
+VAR _CutoffCircle =
+    "<circle cx='" & _TargetNormalized & "' cy='" & _MarkerY & "' r='" & _CutoffOuterSize & "' fill='" & _TargetColor & "'/>" &
+    "<circle cx='" & _TargetNormalized & "' cy='" & _MarkerY & "' r='" & _CutoffInnerSize & "' fill='white'/>"
+
+VAR _MarkerCircle =
+    IF(
+        _CurrentRank = _CutoffRank,
+        _CutoffCircle,
+        _NormalCircle
+    )
+
+/* Updated SVG header:
+   We want the final image to be 500 px wide and 30 px tall.
+   To avoid cutting off the bar when _BarMax increases, we use a viewBox that spans the internal width (0 to _BarMax)
+   and the internal vertical range (from _MarkerY - _CellHeight to _MarkerY + _CellHeight).
+*/
+VAR _YMin = 0   // For _CellHeight = 30 and _MarkerY = 15, _YMin = -15 (set to 0 if you prefer)
+VAR _ViewBoxHeight = _CellHeight   // 30 in this case
+
+VAR _SvgPrefix =
+    "data:image/svg+xml;utf8, <svg xmlns='http://www.w3.org/2000/svg' width='"& _BarMax &"' height='30' viewBox='0 " & _YMin & " " & _BarMax & " " & _ViewBoxHeight & "' preserveAspectRatio='none' overflow='visible'>"
+
+
+VAR _Sort =
+    "<desc>" & FORMAT(_Actual, "000000000000") & "</desc>"
+VAR _BarBaseline =
+    "<rect x='" & _BarMin & "' y='0' width='1' height='100%' fill='" & _BaselineColor & "'/>"
+VAR _BarBackground =
+    "<rect x='" & _BarMin & "' y='2' width='" & _BarMax & "' height='80%' fill='" & _BackgroundColor & "'/>"
+// Use the path for the actual bar with rounded right corners and add a border:
+VAR _ActualBar =
+    "<path d='" & _ActualBarPath & "' fill='" & _BarFillColor & "' stroke='" & _BarBorderColor & "' stroke-width='1'/>"
+VAR _SvgSuffix = "</svg>"
+
+/* Final SVG Assembly */
+VAR _SVG =
+    _SvgPrefix &
+    _Sort &
+    _BarBackground &
+    _ActualBar &
+    _BarBaseline &
+    _ConnectingLineUp &
+    _ConnectingLineDown &
+    _MarkerCircle &
+    _SvgSuffix
+
+RETURN
+    
+    IF(
+         ISINSCOPE('_Customer&Others Table'[Customer]) && not ISBLANK([_4 Pareto Revenue]),
+        _SVG
+    )
